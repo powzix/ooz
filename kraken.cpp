@@ -1394,7 +1394,10 @@ byte *load_file(const char *filename, int *size) {
 int main(int argc, char *argv[]) {
   __int64 start, end, freq;
 
-  if (argc != 3) error("krakenunpack input output");
+  if (argc != 3) {
+    fprintf(stderr, "unkraken v0.01\n");
+    error("unkraken input output");
+  }
 
   int packed_size;
   byte *input = load_file(argv[1], &packed_size);
@@ -1417,7 +1420,7 @@ int main(int argc, char *argv[]) {
     QueryPerformanceFrequency((LARGE_INTEGER*)&freq);
 
     double seconds = (double)(end - start) / freq;
-    fprintf(stderr, "Decoded %d => %d (%.2f seconds, %.2f MB/s)\n", packed_size, unpacked_size, seconds, unpacked_size * 1e-6 / seconds);
+    fprintf(stderr, "%-20s: %8d => %8d (%.2f seconds, %.2f MB/s)\n", argv[1], packed_size, unpacked_size, seconds, unpacked_size * 1e-6 / seconds);
 
   }
 
