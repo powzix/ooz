@@ -130,8 +130,7 @@ typedef struct BitReader {
 
 typedef struct HuffReader {
   // Array to hold the output of the huffman read array operation
-  byte *output;
-  int output_size;
+  byte *output, *output_end;
   // The code table
   HuffmanTree *huff;
   // We decode three parallel streams, two forwards, |src| and |src_mid|
@@ -647,7 +646,7 @@ bool Kraken_DecodeBytesCore(HuffReader *hr) {
   int k, n;
 
   byte *dst = hr->output;
-  byte *dst_end = dst + hr->output_size;
+  byte *dst_end = hr->output_end;
 
   if (src > src_mid)
     return false;
@@ -770,13 +769,14 @@ bool Kraken_DecodeBytesCore(HuffReader *hr) {
   return true;
 }
 
-bool Kraken_DecodeBytes_Type1(const byte *src, const byte *src_end, byte *output, int output_size) {
+bool Kraken_DecodeBytes_Type12(const byte *src, const byte *src_end, byte *output, int output_size, int type) {
   // Temporary storage for huffman table
   byte temp_mem[8192];
   HuffmanTree *huff;
   BitReader bits;
-  int bytes_parsed;
-  int mid_size;
+  int bytes_parsed, half_output_size;
+  uint32 split_left, split_mid, split_right;
+  const byte *src_mid;
   HuffReader hr;
   huff = HuffmanTree_Allocate(256, 11, temp_mem);
   bits.bitpos = 24;
@@ -787,40 +787,96 @@ bool Kraken_DecodeBytes_Type1(const byte *src, const byte *src_end, byte *output
       !HuffmanTree_Decode(huff, &bits))
     return false;
   bytes_parsed = bits.p - src - ((24 - bits.bitpos) / 8);
+  src += bytes_parsed;
   if (huff->used_syms <= 1) {
-    if (bytes_parsed != src_end - src)
+    if (src != src_end)
       return false;
     memset(output, huff->single_symbol, output_size);
     return true;
   }
-  src += bytes_parsed;
-  if (src + 3 > src_end)
-    return false;
   if (!HuffmanTree_MakeLookupTables(huff))
     return false;
-  mid_size = *(uint16*)src;
-  src += 2;
-  hr.huff = huff;
-  hr.output = output;
-  hr.output_size = output_size;
-  hr.src = src;
-  hr.src_end = src_end;
-  hr.src_mid_org = hr.src_mid = src + mid_size;
-  hr.src_bitpos = 0;
-  hr.src_bits = 0;
-  hr.src_mid_bitpos = 0;
-  hr.src_mid_bits = 0;
-  hr.src_end_bitpos = 0;
-  hr.src_end_bits = 0;
-  return Kraken_DecodeBytesCore(&hr);
+
+  if (type == 1) {
+    if (src + 3 > src_end)
+      return false;
+    split_mid = *(uint16*)src;
+    src += 2;
+    hr.huff = huff;
+    hr.output = output;
+    hr.output_end = output + output_size;
+    hr.src = src;
+    hr.src_end = src_end;
+    hr.src_mid_org = hr.src_mid = src + split_mid;
+    hr.src_bitpos = 0;
+    hr.src_bits = 0;
+    hr.src_mid_bitpos = 0;
+    hr.src_mid_bits = 0;
+    hr.src_end_bitpos = 0;
+    hr.src_end_bits = 0;
+    return Kraken_DecodeBytesCore(&hr);
+  } else {
+    if (src + 6 > src_end)
+      return false;
+
+    half_output_size = (output_size + 1) >> 1;
+    split_mid = *(uint32*)src & 0xFFFFFF;
+    src += 3;
+    if (split_mid > (src_end - src))
+      return false;
+    src_mid = src + split_mid;
+    split_left = *(uint16*)src;
+    src += 2;
+    if (src_mid - src < split_left + 2 ||
+        src_end - src_mid < 3)
+      return false;
+    split_right = *(uint16*)src_mid;
+    if (src_end - (src_mid + 2) < split_right + 2)
+      return false;
+
+    hr.huff = huff;
+    hr.output = output;
+    hr.output_end = output + half_output_size;
+    hr.src = src;
+    hr.src_end = src_mid;
+    hr.src_mid_org = hr.src_mid = src + split_left;
+    hr.src_bitpos = 0;
+    hr.src_bits = 0;
+    hr.src_mid_bitpos = 0;
+    hr.src_mid_bits = 0;
+    hr.src_end_bitpos = 0;
+    hr.src_end_bits = 0;
+    if (!Kraken_DecodeBytesCore(&hr))
+      return false;
+
+    hr.huff = huff;
+    hr.output = output + half_output_size;
+    hr.output_end = output + output_size;
+    hr.src = src_mid + 2;
+    hr.src_end = src_end;
+    hr.src_mid_org = hr.src_mid = src_mid + 2 + split_right;
+    hr.src_bitpos = 0;
+    hr.src_bits = 0;
+    hr.src_mid_bitpos = 0;
+    hr.src_mid_bits = 0;
+    hr.src_end_bitpos = 0;
+    hr.src_end_bits = 0;
+    if (!Kraken_DecodeBytesCore(&hr))
+      return false;
+
+    return true;
+  }
 }
 
 int Kraken_DecodeBytes(byte **output, const byte *src, const byte *src_end, int *decoded_size, int output_size) {
   uint32 lo_bits;
   int src_size, num_elems;
+  int type;
+
   if (src_end - src < 5)
     return -1;
-  switch (src[0] >> 5) {
+  type = src[0] >> 5;
+  switch (type) {
   case 0:
     src_size = ((src[0] << 16) | (src[1] << 8) | src[2]) & 0x3FFFF;
     src += 3;
@@ -830,6 +886,7 @@ int Kraken_DecodeBytes(byte **output, const byte *src, const byte *src_end, int 
     *output = (byte*)src;
     return 3 + src_size;
   case 1:
+  case 2:
     lo_bits = _byteswap_ulong(*(int*)(src + 1));
     src += 5;
     src_size = lo_bits & 0x3FFFF;
@@ -838,7 +895,7 @@ int Kraken_DecodeBytes(byte **output, const byte *src, const byte *src_end, int 
     num_elems = (((lo_bits >> 18) | (src[-5] << 14)) & 0x3FFFF) + 1;
     if (num_elems > output_size || src_size >= num_elems)
       return -1;
-    if (output != NULL && !Kraken_DecodeBytes_Type1(src, src + src_size, *output, num_elems))
+    if (output != NULL && !Kraken_DecodeBytes_Type12(src, src + src_size, *output, num_elems, type))
       return -1;
     *decoded_size = num_elems;
     return 5 + src_size;
