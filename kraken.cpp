@@ -17,18 +17,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "stdafx.h"
-typedef unsigned char byte;
-typedef unsigned char uint8;
-typedef unsigned int uint32;
-typedef unsigned __int64 uint64;
-typedef signed __int64 int64;
-typedef signed int int32;
-typedef unsigned short uint16;
 
 // Header in front of each 256k block
 typedef struct KrakenHeader {
   // Type of decoder used, 6 means kraken
   int decoder_type;
+
+  // Whether to restart the decoder
+  bool restart_decoder;
 
   // Whether this block is uncompressed
   bool uncompressed;
@@ -47,6 +43,8 @@ typedef struct KrakenQuantumHeader {
   // Two flags
   uint8 flag1;
   uint8 flag2;
+  // Whether the whole block matched a previous block
+  uint32 whole_match_distance;
 } KrakenQuantumHeader;
 
 // Kraken decompression happens in two phases, first one decodes
@@ -146,6 +144,8 @@ typedef struct KrakenDecoder {
   // in between decode phase 1 and 2.
   byte *phase_buf;
   int phase_buf_size;
+
+  KrakenHeader hdr;
 } KrakenDecoder;
 
 typedef struct HuffmanTree {
@@ -598,11 +598,12 @@ const byte *Kraken_ParseHeader(KrakenHeader *hdr, const byte *p) {
   int b = p[0];
   if ((b & 0xF) != 0xC) return NULL;
   if (((b >> 4) & 3) != 0) return NULL;
+  hdr->restart_decoder = (b >> 7) & 1;
   hdr->uncompressed = (b >> 6) & 1;
   b = p[1];
   hdr->decoder_type = b & 0x3F;
   hdr->use_checksums = !!(b >> 7);
-  if (hdr->decoder_type != 6 && hdr->decoder_type != 10) return NULL;
+  if (hdr->decoder_type != 6 && hdr->decoder_type != 10 && hdr->decoder_type != 5) return NULL;
   return p + 2;
 }
 
@@ -622,13 +623,74 @@ const byte *Kraken_ParseQuantumHeader(KrakenQuantumHeader *hdr, const byte *p, b
   }
   v >>= 18;
   if (v == 1) {
+    // memset
     hdr->checksum = p[3];
     hdr->compressed_size = 0;
+    hdr->whole_match_distance = 0;
     return p + 4;
   }
   return NULL;
 
 }
+
+const byte *LZNA_ParseWholeMatchInfo(const byte *p, uint32 *dist) {
+  uint32 v = _byteswap_ushort(*(uint16*)p);
+
+  if (v < 0x8000) {
+    uint32 x = 0, b, pos = 0;
+    for (;;) {
+      b = p[2];
+      p += 1;
+      if (b & 0x80)
+        break;
+      x += (b + 0x80) << pos;
+      pos += 7;
+
+    }
+    x += (b - 128) << pos;
+    *dist = 0x8000 + v + (x << 15) + 1;
+    return p + 2;
+  } else {
+    *dist = v - 0x8000 + 1;
+    return p + 2;
+  }
+}
+
+const byte *LZNA_ParseQuantumHeader(KrakenQuantumHeader *hdr, const byte *p, bool use_checksum, int raw_len) {
+  uint32 v = (p[0] << 8) | p[1];
+  uint32 size = v & 0x3FFF;
+  if (size != 0x3fff) {
+    hdr->compressed_size = size + 1;
+    hdr->flag1 = (v >> 14) & 1;
+    hdr->flag2 = (v >> 15) & 1;
+    if (use_checksum) {
+      hdr->checksum = (p[2] << 16) | (p[3] << 8) | p[4];
+      return p + 5;
+    } else {
+      return p + 2;
+    }
+  }
+  v >>= 14;
+  if (v == 0) {
+    p = LZNA_ParseWholeMatchInfo(p + 2, &hdr->whole_match_distance);
+    hdr->compressed_size = 0;
+    return p;
+  }
+  if (v == 1) {
+    // memset
+    hdr->checksum = p[2];
+    hdr->compressed_size = 0;
+    hdr->whole_match_distance = 0;
+    return p + 3;
+  }
+  if (v == 2) {
+    // uncompressed
+    hdr->compressed_size = raw_len;
+    return p + 2;
+  }
+  return NULL;
+}
+
 
 uint32 Kraken_GetCrc(const byte *p, size_t p_size) {
   // TODO: implement
@@ -1901,7 +1963,6 @@ bool Mermaid_ProcessLzRuns(int mode,
   if (src_cur != src_end)
     return false;
 
-
   return true;
 }
 
@@ -1909,7 +1970,6 @@ bool Mermaid_ProcessLzRuns(int mode,
 int Mermaid_DecodeQuantum(byte *dst, byte *dst_end, byte *dst_start,
                           const byte *src, const byte *src_end,
                           byte *temp, byte *temp_end) {
-
   const byte *src_in = src;
   int mode, chunkhdr, dst_count, src_used, written_bytes;
 
@@ -1959,23 +2019,43 @@ int Mermaid_DecodeQuantum(byte *dst, byte *dst_end, byte *dst_start,
   return src - src_in;
 }
 
+int LZNA_DecodeQuantum(byte *dst, byte *dst_end, byte *dst_start,
+                       const byte *src, const byte *src_end,
+                       struct LznaState *lut);
+void LZNA_InitLookup(LznaState *lut);
+
+void Kraken_CopyWholeMatch(byte *dst, uint32 offset, size_t length) {
+  size_t i = 0;
+  byte *src = dst - offset;
+  if (offset >= 8) {
+    for (; i + 8 <= length; i += 8)
+      *(uint64*)(dst + i) = *(uint64*)(src + i);
+  } 
+  for (; i < length; i++)
+    dst[i] = src[i];
+}
+
 bool Kraken_DecodeStep(struct KrakenDecoder *dec,
                        byte *dst_start, int offset, int dst_bytes_left,
                        const byte *src, int src_bytes_left) {
   const byte *src_in = src;
   const byte *src_end = src + src_bytes_left;
   KrakenQuantumHeader qhdr;
-  KrakenHeader hdr;
   int n;
+  int max_block_size;
 
-  src = Kraken_ParseHeader(&hdr, src);
-  if (!src)
-    return false;
+  if ((offset & 0x3FFFF) == 0) {
+    src = Kraken_ParseHeader(&dec->hdr, src);
+    if (!src)
+      return false;
 
-  if (dst_bytes_left > 0x40000)
-    dst_bytes_left = 0x40000;
+  }
 
-  if (hdr.uncompressed) {
+  max_block_size = (dec->hdr.decoder_type != 5) ? 0x40000 : 0x4000;
+  if (dst_bytes_left > max_block_size)
+    dst_bytes_left = max_block_size;
+
+  if (dec->hdr.uncompressed) {
     if (src_end - src < dst_bytes_left) {
       dec->src_used = dec->dst_used = 0;
       return true;
@@ -1986,7 +2066,12 @@ bool Kraken_DecodeStep(struct KrakenDecoder *dec,
     return true;
   }
 
-  src = Kraken_ParseQuantumHeader(&qhdr, src, hdr.use_checksums);
+  if (dec->hdr.decoder_type != 5) {
+    src = Kraken_ParseQuantumHeader(&qhdr, src, dec->hdr.use_checksums);
+  } else {
+    src = LZNA_ParseQuantumHeader(&qhdr, src, dec->hdr.use_checksums, dst_bytes_left);
+  }
+
   if (!src || src > src_end)
     return false;
 
@@ -1999,13 +2084,19 @@ bool Kraken_DecodeStep(struct KrakenDecoder *dec,
     return false;
 
   if (qhdr.compressed_size == 0) {
-    memset(dst_start + offset, qhdr.checksum, dst_bytes_left);
+    if (qhdr.whole_match_distance != 0) {
+      if (qhdr.whole_match_distance > offset)
+        return false;
+      Kraken_CopyWholeMatch(dst_start + offset, qhdr.whole_match_distance, dst_bytes_left);
+    } else {
+      memset(dst_start + offset, qhdr.checksum, dst_bytes_left);
+    }
     dec->src_used = (src - src_in);
     dec->dst_used = dst_bytes_left;
     return true;
   }
 
-  if (hdr.use_checksums && 
+  if (dec->hdr.use_checksums &&
      (Kraken_GetCrc(src, qhdr.compressed_size) & 0xFFFFFF) != qhdr.checksum)
     return false;
 
@@ -2016,10 +2107,18 @@ bool Kraken_DecodeStep(struct KrakenDecoder *dec,
     return true;
   }
 
-  if (hdr.decoder_type == 6) {
+  if (dec->hdr.decoder_type == 6) {
     n = Kraken_DecodeQuantum(dst_start + offset, dst_start + offset + dst_bytes_left, dst_start,
                          src, src + qhdr.compressed_size,
                          dec->phase_buf, dec->phase_buf + dec->phase_buf_size);
+  } else if (dec->hdr.decoder_type == 5) {
+    if (dec->hdr.restart_decoder) {
+      dec->hdr.restart_decoder = false;
+      LZNA_InitLookup((struct LznaState*)dec->phase_buf);
+    }
+    n = LZNA_DecodeQuantum(dst_start + offset, dst_start + offset + dst_bytes_left, dst_start,
+                              src, src + qhdr.compressed_size,
+                              (struct LznaState*)dec->phase_buf);
   } else {
     n = Mermaid_DecodeQuantum(dst_start + offset, dst_start + offset + dst_bytes_left, dst_start,
                               src, src + qhdr.compressed_size,
@@ -2084,7 +2183,7 @@ int main(int argc, char *argv[]) {
   __int64 start, end, freq;
 
   if (argc != 3) {
-    fprintf(stderr, "unkraken v0.01\n");
+    fprintf(stderr, "unkraken v0.02\n");
     error("unkraken input output");
   }
 
