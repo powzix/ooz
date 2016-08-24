@@ -158,6 +158,7 @@
     <ClInclude Include="targetver.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="bitknit.cpp" />
     <ClCompile Include="kraken.cpp" />
     <ClCompile Include="lzna.cpp" />
     <ClCompile Include="stdafx.cpp">

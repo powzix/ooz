@@ -603,7 +603,7 @@ const byte *Kraken_ParseHeader(KrakenHeader *hdr, const byte *p) {
   b = p[1];
   hdr->decoder_type = b & 0x3F;
   hdr->use_checksums = !!(b >> 7);
-  if (hdr->decoder_type != 6 && hdr->decoder_type != 10 && hdr->decoder_type != 5) return NULL;
+  if (hdr->decoder_type != 6 && hdr->decoder_type != 10 && hdr->decoder_type != 5 && hdr->decoder_type != 11) return NULL;
   return p + 2;
 }
 
@@ -2024,6 +2024,12 @@ int LZNA_DecodeQuantum(byte *dst, byte *dst_end, byte *dst_start,
                        struct LznaState *lut);
 void LZNA_InitLookup(LznaState *lut);
 
+struct BitknitState;
+
+void BitknitState_Init(BitknitState *bk);
+size_t Bitknit_Decode(const byte *src, const byte *src_end, byte *dst, byte *dst_end, byte *dst_start, BitknitState *bk);
+
+
 void Kraken_CopyWholeMatch(byte *dst, uint32 offset, size_t length) {
   size_t i = 0;
   byte *src = dst - offset;
@@ -2051,7 +2057,7 @@ bool Kraken_DecodeStep(struct KrakenDecoder *dec,
 
   }
 
-  max_block_size = (dec->hdr.decoder_type != 5) ? 0x40000 : 0x4000;
+  max_block_size = (dec->hdr.decoder_type != 5 && dec->hdr.decoder_type != 11) ? 0x40000 : 0x4000;
   if (dst_bytes_left > max_block_size)
     dst_bytes_left = max_block_size;
 
@@ -2066,7 +2072,7 @@ bool Kraken_DecodeStep(struct KrakenDecoder *dec,
     return true;
   }
 
-  if (dec->hdr.decoder_type != 5) {
+  if (dec->hdr.decoder_type != 5 && dec->hdr.decoder_type != 11) {
     src = Kraken_ParseQuantumHeader(&qhdr, src, dec->hdr.use_checksums);
   } else {
     src = LZNA_ParseQuantumHeader(&qhdr, src, dec->hdr.use_checksums, dst_bytes_left);
@@ -2119,6 +2125,13 @@ bool Kraken_DecodeStep(struct KrakenDecoder *dec,
     n = LZNA_DecodeQuantum(dst_start + offset, dst_start + offset + dst_bytes_left, dst_start,
                               src, src + qhdr.compressed_size,
                               (struct LznaState*)dec->phase_buf);
+  } else if (dec->hdr.decoder_type == 11) {
+    if (dec->hdr.restart_decoder) {
+      dec->hdr.restart_decoder = false;
+      BitknitState_Init((struct BitknitState*)dec->phase_buf);
+    }
+    n = Bitknit_Decode(src, src + qhdr.compressed_size, dst_start + offset, dst_start + offset + dst_bytes_left, dst_start, (struct BitknitState*)dec->phase_buf);
+
   } else {
     n = Mermaid_DecodeQuantum(dst_start + offset, dst_start + offset + dst_bytes_left, dst_start,
                               src, src + qhdr.compressed_size,
@@ -2183,7 +2196,7 @@ int main(int argc, char *argv[]) {
   __int64 start, end, freq;
 
   if (argc != 3) {
-    fprintf(stderr, "unkraken v0.02\n");
+    fprintf(stderr, "unkraken v0.03\n");
     error("unkraken input output");
   }
 
