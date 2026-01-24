@@ -4310,11 +4310,15 @@ void LoadLib() {
   COMPFUNCNAME[1] = DECFUNCNAME[1] = 'O';
   COMPFUNCNAME[2] = DECFUNCNAME[2] = 'o';
 #endif
+#ifdef _WIN32
   HINSTANCE mod = LoadLibraryA(LIBNAME);
   OodLZ_Compress = (OodLZ_CompressFunc*)GetProcAddress(mod, COMPFUNCNAME);
   OodLZ_Decompress = (OodLZ_DecompressFunc*)GetProcAddress(mod, DECFUNCNAME);
   if (!OodLZ_Compress || !OodLZ_Decompress)
     error("error loading", LIBNAME);
+#else
+  error("oo2core DLL loading not supported on this platform", "");
+#endif
 }
 
 int main(int argc, char *argv[]) {
