@@ -1,8 +1,8 @@
 # Compiler
-CXX = g++
+CXX = c++
 
 # Compiler flags
-CXXFLAGS = -Wno-conversion-null -Wno-format -Wno-unsequenced -Wno-write-strings
+CXXFLAGS =
 
 # Source files
 SRCS = bitknit.cpp kraken.cpp lzna.cpp
@@ -13,15 +13,18 @@ OBJS = $(SRCS:.cpp=.o)
 # Executable name
 TARGET = ooz
 
+# .cpp source suffix
+.SUFFIXES: .cpp .o
+
 # Default target
 all: $(TARGET)
 
 # Link object files to create the executable
 $(TARGET): $(OBJS)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $(OBJS)
 
 # Compile source files to object files
-%.o: %.cpp
+.cpp.o:
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Clean up build files
