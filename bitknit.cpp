@@ -319,7 +319,7 @@ size_t Bitknit_Decode(const byte *src, const byte *src_end, byte *dst, byte *dst
 
   v = *(uint32*)src, src += 4;
   if (v < 0x10000)
-    return NULL;
+    return 0;
 
   a = v >> 4;
   n = v & 0xF;
@@ -343,7 +343,8 @@ size_t Bitknit_Decode(const byte *src, const byte *src_end, byte *dst, byte *dst
     RENORMALIZE();
 
     if (sym < 256) {
-      *dst++ = sym + dst[last_match_negative];
+      *dst = sym + dst[last_match_negative];
+      dst++;
 
       if (dst + 4 >= dst_end)
         break;
@@ -352,7 +353,8 @@ size_t Bitknit_Decode(const byte *src, const byte *src_end, byte *dst, byte *dst
       RENORMALIZE();
 
       if (sym < 256) {
-        *dst++ = sym + dst[last_match_negative];
+        *dst = sym + dst[last_match_negative];
+        dst++;
         continue;
       }
     }

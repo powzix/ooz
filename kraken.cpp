@@ -4185,13 +4185,13 @@ enum {
 bool arg_stdout, arg_force, arg_quiet, arg_dll;
 int arg_compressor = kCompressor_Kraken, arg_level = 4;
 char arg_direction;
-char *verifyfolder;
+const char *verifyfolder;
 
 int ParseCmdLine(int argc, char *argv[]) {
   int i;
   // parse command line
   for (i = 1; i < argc; i++) {
-    char *s = argv[i], c;
+    const char *s = argv[i]; char c;
     if (*s != '-')
       break;
     if (*++s == '-') {
@@ -4310,11 +4310,15 @@ void LoadLib() {
   COMPFUNCNAME[1] = DECFUNCNAME[1] = 'O';
   COMPFUNCNAME[2] = DECFUNCNAME[2] = 'o';
 #endif
+#ifdef _WIN32
   HINSTANCE mod = LoadLibraryA(LIBNAME);
   OodLZ_Compress = (OodLZ_CompressFunc*)GetProcAddress(mod, COMPFUNCNAME);
   OodLZ_Decompress = (OodLZ_DecompressFunc*)GetProcAddress(mod, DECFUNCNAME);
   if (!OodLZ_Compress || !OodLZ_Decompress)
     error("error loading", LIBNAME);
+#else
+  error("oo2core DLL loading not supported on this platform", "");
+#endif
 }
 
 int main(int argc, char *argv[]) {
@@ -4379,7 +4383,7 @@ int main(int argc, char *argv[]) {
       QueryPerformanceFrequency((LARGE_INTEGER*)&freq);
       double seconds = (double)(end - start) / freq;
       if (!arg_quiet)
-        fprintf(stderr, "%-20s: %8d => %8ld (%.2f seconds, %.2f MB/s)\n", argv[argi], input_size, outbytes, seconds, input_size * 1e-6 / seconds);
+        fprintf(stderr, "%-20s: %8d => %8d (%.2f seconds, %.2f MB/s)\n", argv[argi], input_size, outbytes, seconds, input_size * 1e-6 / seconds);
     } else {
       if (arg_dll)
         LoadLib();
@@ -4418,7 +4422,7 @@ int main(int argc, char *argv[]) {
         if (*s == '/' || *s == '\\')
           basename = s + 1;
       const char *ext = strrchr(basename, '.');
-      snprintf(buf, sizeof(buf), "%s/%.*s", verifyfolder, ext ? (ext - basename) : strlen(basename), basename);
+      snprintf(buf, sizeof(buf), "%s/%.*s", verifyfolder, (int)(ext ? (ext - basename) : strlen(basename)), basename);
       if (!Verify(buf, output, outbytes, curfile))
         return 1;
       nverify++;
